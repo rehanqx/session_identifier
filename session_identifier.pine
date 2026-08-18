@@ -1,0 +1,271 @@
+//@version=6
+indicator(
+    title = "Smart Money Concepts - Clean Session Engine (v6)",
+    shorttitle = "SMC Clean Sessions",
+    overlay = true,
+    max_lines_count = 500,
+    max_labels_count = 500,
+    max_boxes_count = 500
+)
+
+// ===================================================
+// SECTION 1 — INPUT SETTINGS & CONFIGURATION
+// ===================================================
+
+group_tz = "━━━ TIMEZONE & LOOKBACK SETTINGS ━━━"
+time_zone     = input.string("America/New_York", "Timezone Selection", options=["America/New_York", "UTC", "Europe/London", "Asia/Tokyo", "Exchange"], group=group_tz)
+history_days  = input.int(3, "Max Historical Days to Show", minval=1, maxval=14, group=group_tz, tooltip="Limits displayed session boxes and lines to recent days for a clean chart")
+
+group_asia = "━━━ ASIAN SESSION ━━━"
+enable_asia     = input.bool(true, "Enable Asian Session", group=group_asia)
+asia_time       = input.string("2000-0000:1234567", "Asian Session Hours", group=group_asia)
+col_asia_box    = input.color(color.new(#90a4ae, 92), "Asian Box Shading", group=group_asia)
+col_asia_line   = input.color(#37474f, "Asian Line Color", group=group_asia)
+
+group_london = "━━━ LONDON SESSION ━━━"
+enable_london   = input.bool(true, "Enable London Session", group=group_london)
+london_time     = input.string("0300-1100:1234567", "London Session Hours", group=group_london)
+col_london_box  = input.color(color.new(#78909c, 90), "London Box Shading", group=group_london)
+col_london_line = input.color(#263238, "London Line Color", group=group_london)
+
+group_ny = "━━━ NEW YORK SESSION ━━━"
+enable_ny       = input.bool(true, "Enable New York Session", group=group_ny)
+ny_time         = input.string("0800-1700:1234567", "New York Session Hours", group=group_ny)
+col_ny_box      = input.color(color.new(#b0bec5, 90), "New York Box Shading", group=group_ny)
+col_ny_line     = input.color(#37474f, "New York Line Color", group=group_ny)
+
+group_lc = "━━━ LONDON CLOSE SESSION ━━━"
+enable_lc       = input.bool(false, "Enable London Close Session", group=group_lc)
+lc_time         = input.string("1100-1300:1234567", "London Close Hours", group=group_lc)
+col_lc_box      = input.color(color.new(#cfd8dc, 90), "London Close Box Shading", group=group_lc)
+col_lc_line     = input.color(#455a64, "London Close Line Color", group=group_lc)
+
+group_visual = "━━━ VISUAL STYLING SETTINGS ━━━"
+show_boxes      = input.bool(true, "Show Session Shading Boxes", group=group_visual)
+show_high_line  = input.bool(true, "Show Session High Line", group=group_visual)
+show_low_line   = input.bool(true, "Show Session Low Line", group=group_visual)
+extend_lines    = input.bool(true, "Extend Lines to Current Bar", group=group_visual)
+stop_on_sweep   = input.bool(true, "Truncate Lines When Swept", group=group_visual)
+show_dashboard  = input.bool(false, "Show Status Dashboard", group=group_visual)
+
+// ===================================================
+// SECTION 2 — UDT DEFINITIONS & SYSTEM MEMORY
+// ===================================================
+
+type SessionTracker
+    string name
+    string sess_spec
+    color  box_col
+    color  line_col
+    bool   enabled
+    int    start_bar
+    int    start_time
+    float  high_val
+    float  low_val
+    bool   is_active
+    box    active_box
+    line   active_h_line
+    line   active_l_line
+    label  active_label
+
+type SessionLevel
+    line  high_line
+    line  low_line
+    label session_lbl
+    box   range_box
+    float high_val
+    float low_val
+    int   day_time
+    bool  high_swept
+    bool  low_swept
+
+var array<SessionLevel> active_session_levels = array.new<SessionLevel>()
+
+// Helper to resolve timezone
+f_tz(tz) =>
+    tz == "Exchange" ? syminfo.timezone : tz
+
+// Helper to check in-session status
+f_is_in_session(sess_str, tz_str) =>
+    not na(time(timeframe.period, sess_str, f_tz(tz_str)))
+
+// Session Trackers Instances
+var SessionTracker asia_tr   = SessionTracker.new("ASIAN", asia_time, col_asia_box, col_asia_line, enable_asia, 0, 0, 0.0, 0.0, false, na, na, na, na)
+var SessionTracker london_tr = SessionTracker.new("LONDON", london_time, col_london_box, col_london_line, enable_london, 0, 0, 0.0, 0.0, false, na, na, na, na)
+var SessionTracker ny_tr     = SessionTracker.new("NEW YORK", ny_time, col_ny_box, col_ny_line, enable_ny, 0, 0, 0.0, 0.0, false, na, na, na, na)
+var SessionTracker lc_tr     = SessionTracker.new("LONDON CLOSE", lc_time, col_lc_box, col_lc_line, enable_lc, 0, 0, 0.0, 0.0, false, na, na, na, na)
+
+// Sync input configurations dynamically
+asia_tr.enabled     := enable_asia
+asia_tr.sess_spec   := asia_time
+asia_tr.box_col     := col_asia_box
+asia_tr.line_col    := col_asia_line
+
+london_tr.enabled   := enable_london
+london_tr.sess_spec := london_time
+london_tr.box_col   := col_london_box
+london_tr.line_col  := col_london_line
+
+ny_tr.enabled       := enable_ny
+ny_tr.sess_spec     := ny_time
+ny_tr.box_col       := col_ny_box
+ny_tr.line_col      := col_ny_line
+
+lc_tr.enabled       := enable_lc
+lc_tr.sess_spec     := lc_time
+lc_tr.box_col       := col_lc_box
+lc_tr.line_col      := col_lc_line
+
+// Historical day limit calculation
+int ms_in_day = 86400000
+bool is_recent_day = (last_bar_time - time) <= (history_days * ms_in_day)
+
+// ===================================================
+// SECTION 3 — LIVE REALTIME SESSION PROCESSING ENGINE
+// ===================================================
+
+f_update_session(SessionTracker st) =>
+    if st.enabled and is_recent_day
+        bool in_sess = f_is_in_session(st.sess_spec, time_zone)
+        bool sess_start = in_sess and not st.is_active
+        bool sess_end   = not in_sess and st.is_active
+        
+        // 1. Session Starts: Create Box, Lines & Single Top Label Live
+        if sess_start
+            st.is_active  := true
+            st.start_bar  := bar_index
+            st.start_time := time
+            st.high_val   := high
+            st.low_val    := low
+            
+            if show_boxes
+                st.active_box := box.new(left=st.start_time, top=st.high_val, right=time, bottom=st.low_val, xloc=xloc.bar_time, bgcolor=st.box_col, border_color=color.new(st.line_col, 80), border_width=1)
+                
+            if show_high_line
+                st.active_h_line := line.new(st.start_bar, st.high_val, bar_index + 1, st.high_val, xloc=xloc.bar_index, color=st.line_col, width=1, style=line.style_solid)
+                
+            if show_low_line
+                st.active_l_line := line.new(st.start_bar, st.low_val, bar_index + 1, st.low_val, xloc=xloc.bar_index, color=st.line_col, width=1, style=line.style_solid)
+
+            // SINGLE Label placed cleanly above High line
+            st.active_label := label.new(st.start_bar, st.high_val, text=st.name, xloc=xloc.bar_index, style=label.style_label_down, color=color.new(color.white, 100), textcolor=st.line_col, size=size.small)
+
+        // 2. Session In-Progress: Update High/Low & Geometry Live
+        if in_sess and st.is_active and not sess_start
+            st.high_val := math.max(st.high_val, high)
+            st.low_val  := math.min(st.low_val, low)
+            
+            if not na(st.active_box)
+                box.set_top(st.active_box, st.high_val)
+                box.set_bottom(st.active_box, st.low_val)
+                box.set_right(st.active_box, time)
+                
+            if not na(st.active_h_line)
+                line.set_y1(st.active_h_line, st.high_val)
+                line.set_y2(st.active_h_line, st.high_val)
+                line.set_x2(st.active_h_line, bar_index + 1)
+                
+            if not na(st.active_l_line)
+                line.set_y1(st.active_l_line, st.low_val)
+                line.set_y2(st.active_l_line, st.low_val)
+                line.set_x2(st.active_l_line, bar_index + 1)
+
+            if not na(st.active_label)
+                label.set_y(st.active_label, st.high_val)
+
+        // 3. Session Ends: Freeze & Transfer to Active Levels Manager
+        if sess_end
+            st.is_active := false
+            if not na(st.active_box)
+                box.set_right(st.active_box, time)
+                
+            SessionLevel s_lvl = SessionLevel.new(st.active_h_line, st.active_l_line, st.active_label, st.active_box, st.high_val, st.low_val, st.start_time, false, false)
+            array.push(active_session_levels, s_lvl)
+            
+            // Clear active pointers for next session occurrence
+            st.active_box    := na
+            st.active_h_line := na
+            st.active_l_line := na
+            st.active_label  := na
+    0
+
+// Execute Sessions Live
+f_update_session(asia_tr)
+f_update_session(london_tr)
+f_update_session(ny_tr)
+f_update_session(lc_tr)
+
+// ===================================================
+// SECTION 4 — LINE EXTENSION & SWEEP CLEANUP
+// ===================================================
+
+if array.size(active_session_levels) > 0
+    for i = array.size(active_session_levels) - 1 to 0
+        SessionLevel lvl = array.get(active_session_levels, i)
+        
+        // Auto-delete objects older than history_days
+        if (last_bar_time - lvl.day_time) > (history_days * ms_in_day)
+            if not na(lvl.high_line)
+                line.delete(lvl.high_line)
+            if not na(lvl.low_line)
+                line.delete(lvl.low_line)
+            if not na(lvl.session_lbl)
+                label.delete(lvl.session_lbl)
+            if not na(lvl.range_box)
+                box.delete(lvl.range_box)
+            array.remove(active_session_levels, i)
+            continue
+            
+        // 1. Manage High Line Extension & Sweep
+        if not na(lvl.high_line) and not lvl.high_swept
+            if high > lvl.high_val and stop_on_sweep
+                lvl.high_swept := true
+                line.set_x2(lvl.high_line, bar_index)
+                line.set_style(lvl.high_line, line.style_dotted)
+            else if extend_lines
+                line.set_x2(lvl.high_line, bar_index + 5)
+                
+        // 2. Manage Low Line Extension & Sweep
+        if not na(lvl.low_line) and not lvl.low_swept
+            if low < lvl.low_val and stop_on_sweep
+                lvl.low_swept := true
+                line.set_x2(lvl.low_line, bar_index)
+                line.set_style(lvl.low_line, line.style_dotted)
+            else if extend_lines
+                line.set_x2(lvl.low_line, bar_index + 5)
+
+// ===================================================
+// SECTION 5 — OPTIONAL DASHBOARD
+// ===================================================
+
+var table db = table.new(
+    position = position.top_right,
+    columns = 2,
+    rows = 5,
+    bgcolor = color.new(#0d1117, 15),
+    border_color = color.new(#30363d, 0),
+    border_width = 1,
+    frame_color = color.new(#58a6ff, 50),
+    frame_width = 1
+)
+
+if show_dashboard and barstate.islast
+    table.cell(db, 0, 0, "SMC SESSION ENGINE", text_color=#58a6ff, text_size=size.small, bgcolor=color.new(#161b22, 0), text_halign=text.align_center)
+    table.cell(db, 1, 0, "TIMEZONE: " + time_zone, text_color=#8b949e, text_size=size.small, bgcolor=color.new(#161b22, 0), text_halign=text.align_center)
+
+    bool in_asia   = enable_asia   and f_is_in_session(asia_time, time_zone)
+    bool in_london = enable_london and f_is_in_session(london_time, time_zone)
+    bool in_ny     = enable_ny     and f_is_in_session(ny_time, time_zone)
+    bool in_lc     = enable_lc     and f_is_in_session(lc_time, time_zone)
+
+    table.cell(db, 0, 1, "Asian Session", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 1, in_asia ? "ACTIVE 🟢" : "INACTIVE ⚪", text_color=in_asia ? #1e88e5 : #8b949e, text_size=size.tiny)
+
+    table.cell(db, 0, 2, "London Session", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 2, in_london ? "ACTIVE 🟢" : "INACTIVE ⚪", text_color=in_london ? #8e24aa : #8b949e, text_size=size.tiny)
+
+    table.cell(db, 0, 3, "New York Session", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 3, in_ny ? "ACTIVE 🟢" : "INACTIVE ⚪", text_color=in_ny ? #ffb300 : #8b949e, text_size=size.tiny)
+
+    table.cell(db, 0, 4, "London Close", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 4, in_lc ? "ACTIVE 🟢" : "INACTIVE ⚪", text_color=in_lc ? #e53935 : #8b949e, text_size=size.tiny)
