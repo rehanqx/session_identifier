@@ -1,0 +1,99 @@
+//@version=5
+indicator("Session Marker", shorttitle="Session Marker", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ================================================================
+//  LOGIC: Session boundaries time() function se detect hoti hain —
+//  ye har timeframe (1m se 4H tak) pe khud accurately kaam karta
+//  hai, koi price hardcode nahi. Line ka level candle ke UPAR
+//  ATR-based offset se rakha jata hai, taake wick ke through na ho
+//  aur har symbol (Gold, Forex, etc.) pe automatically scale ho.
+// ================================================================
+
+// ============================== INPUTS ==============================
+grpS = "Sessions (Exchange Time)"
+useAsia   = input.bool(true,  "Asian Session",    group=grpS, inline="a")
+asiaTime  = input.session("2100-0600", "", group=grpS, inline="a")
+asiaCol   = input.color(color.new(#2962FF,0), "", group=grpS, inline="a")
+
+useLondon = input.bool(true,  "London Session",   group=grpS, inline="l")
+lonTime   = input.session("0700-1600", "", group=grpS, inline="l")
+lonCol    = input.color(color.new(#FF6D00,0), "", group=grpS, inline="l")
+
+useNY     = input.bool(true,  "New York Session", group=grpS, inline="n")
+nyTime    = input.session("1300-2200", "", group=grpS, inline="n")
+nyCol     = input.color(color.new(#AA00FF,0), "", group=grpS, inline="n")
+
+tz = input.string("UTC", "Timezone (e.g. UTC, America/New_York, Asia/Karachi)", group=grpS)
+
+grpL = "Style"
+lw            = input.int(1, "Horizontal Line Width", minval=1, maxval=4, group=grpL)
+offsetMult    = input.float(0.3, "Line Offset Above Candle (x ATR)", minval=0.05, maxval=3.0, step=0.05, group=grpL)
+showDivider   = input.bool(true, "Show Vertical Session Divider", group=grpL)
+dividerCol    = input.color(color.new(color.gray, 40), "Divider Color", group=grpL)
+showCloseMark = input.bool(true, "Mark Session Close Too", group=grpL)
+lblSizeIn     = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=grpL)
+
+lSize = lblSizeIn == "Tiny" ? size.tiny : lblSizeIn == "Normal" ? size.normal : lblSizeIn == "Large" ? size.large : size.small
+
+// ============================== TYPE ==============================
+type SessionInfo
+    string name
+    color  col
+    line   hLine
+    float  sessHigh
+
+var SessionInfo asia   = SessionInfo.new(name="ASIAN",    col=asiaCol)
+var SessionInfo london = SessionInfo.new(name="LONDON",   col=lonCol)
+var SessionInfo ny     = SessionInfo.new(name="NEW YORK", col=nyCol)
+
+// ============================== SESSION DETECTION ==============================
+inSess(sess) => not na(time(timeframe.period, sess, tz))
+
+asiaOn = useAsia   and inSess(asiaTime)
+lonOn  = useLondon and inSess(lonTime)
+nyOn   = useNY     and inSess(nyTime)
+
+asiaStart = asiaOn and not asiaOn[1]
+asiaEnd   = not asiaOn and asiaOn[1]
+lonStart  = lonOn  and not lonOn[1]
+lonEnd    = not lonOn  and lonOn[1]
+nyStart   = nyOn   and not nyOn[1]
+nyEnd     = not nyOn   and nyOn[1]
+
+atrVal = ta.atr(14)
+
+// ============================== CORE LOGIC ==============================
+processSession(SessionInfo s, bool active, bool sStart, bool sEnd) =>
+    offset = atrVal * offsetMult
+
+    // ---- Session shuru: vertical divider + horizontal line UPAR se ----
+    if sStart
+        s.sessHigh := high
+        yPos = s.sessHigh + offset
+        s.hLine := line.new(bar_index, yPos, bar_index, yPos, color=s.col, width=lw, style=line.style_solid)
+        label.new(bar_index, yPos, s.name, style=label.style_label_down, color=color(na), textcolor=s.col, size=lSize)
+        if showDivider
+            line.new(bar_index, high, bar_index, low, extend=extend.both, color=dividerCol, width=1, style=line.style_dashed)
+
+    // ---- Session chal rahi hai: line high ke sath upar move ho aur aage extend ho ----
+    else if active
+        s.sessHigh := math.max(s.sessHigh, high)
+        yPos = s.sessHigh + offset
+        if not na(s.hLine)
+            line.set_y1(s.hLine, yPos)
+            line.set_y2(s.hLine, yPos)
+            line.set_x2(s.hLine, bar_index)
+
+    // ---- Session khatam: close divider + label ----
+    if sEnd and showCloseMark
+        if showDivider
+            line.new(bar_index, high, bar_index, low, extend=extend.both, color=dividerCol, width=1, style=line.style_dashed)
+        yPos = s.sessHigh + offset
+        label.new(bar_index, yPos, s.name + " CLOSE", style=label.style_label_down, color=color(na), textcolor=s.col, size=lSize)
+
+if useAsia
+    processSession(asia, asiaOn, asiaStart, asiaEnd)
+if useLondon
+    processSession(london, lonOn, lonStart, lonEnd)
+if useNY
+    processSession(ny, nyOn, nyStart, nyEnd)
