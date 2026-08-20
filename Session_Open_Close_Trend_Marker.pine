@@ -1,0 +1,112 @@
+//@version=5
+indicator("Session Open/Close & Trend Marker", shorttitle="Session O/C", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ================================================================
+//  LOGIC: Sessions detect hoti hain TradingView ke built-in time()
+//  function se — jo har timeframe (1m se 4H tak) pe khud-ba-khud
+//  sahi session window nikal leta hai. Koi price ya level manually
+//  hardcode nahi kiya gaya — sab kuch open/high/low/close se live
+//  calculate hota hai.
+// ================================================================
+
+// ============================== INPUTS ==============================
+grpS = "Sessions (Exchange Time)"
+useAsia   = input.bool(true,  "Asian Session",    group=grpS, inline="a")
+asiaTime  = input.session("2100-0600", "", group=grpS, inline="a")
+asiaCol   = input.color(color.new(#2962FF,0), "", group=grpS, inline="a")
+
+useLondon = input.bool(true,  "London Session",   group=grpS, inline="l")
+lonTime   = input.session("0700-1600", "", group=grpS, inline="l")
+lonCol    = input.color(color.new(#FF6D00,0), "", group=grpS, inline="l")
+
+useNY     = input.bool(true,  "New York Session", group=grpS, inline="n")
+nyTime    = input.session("1300-2200", "", group=grpS, inline="n")
+nyCol     = input.color(color.new(#AA00FF,0), "", group=grpS, inline="n")
+
+tz = input.string("UTC", "Timezone (e.g. UTC, America/New_York, Asia/Karachi)", group=grpS)
+
+grpL = "Style"
+lw           = input.int(1, "Line Width", minval=1, maxval=4, group=grpL)
+extendRight  = input.int(30, "Extend Close Line (bars)", minval=1, maxval=200, group=grpL)
+showOpenLbl  = input.bool(true, "Show Open Labels", group=grpL)
+showCloseLbl = input.bool(true, "Show Close Labels", group=grpL)
+showTrend    = input.bool(true, "Show Session Trend Line (Open->Close)", group=grpL)
+showBox      = input.bool(true, "Shade Session Range", group=grpL)
+boxTransp    = input.int(90, "Box Transparency", minval=0, maxval=100, group=grpL)
+lblSizeIn    = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=grpL)
+
+lSize = lblSizeIn == "Tiny" ? size.tiny : lblSizeIn == "Normal" ? size.normal : lblSizeIn == "Large" ? size.large : size.small
+
+// ============================== TYPE ==============================
+// Har session ka apna record — naye din pe naya instance nahi banta,
+// same object update hota rehta hai (memory efficient, clean).
+type SessionInfo
+    string name
+    color  col
+    line   openLine
+    line   closeLine
+    line   trendLine
+    box    rangeBox
+    float  openPrice
+    float  hi
+    float  lo
+    int    startBar
+
+var SessionInfo asia   = SessionInfo.new(name="ASIA",     col=asiaCol)
+var SessionInfo london = SessionInfo.new(name="LONDON",   col=lonCol)
+var SessionInfo ny     = SessionInfo.new(name="NEW YORK", col=nyCol)
+
+// ============================== SESSION DETECTION ==============================
+inSess(sess) => not na(time(timeframe.period, sess, tz))
+
+asiaOn = useAsia   and inSess(asiaTime)
+lonOn  = useLondon and inSess(lonTime)
+nyOn   = useNY     and inSess(nyTime)
+
+asiaStart = asiaOn and not asiaOn[1]
+asiaEnd   = not asiaOn and asiaOn[1]
+lonStart  = lonOn  and not lonOn[1]
+lonEnd    = not lonOn  and lonOn[1]
+nyStart   = nyOn   and not nyOn[1]
+nyEnd     = not nyOn   and nyOn[1]
+
+// ============================== CORE LOGIC ==============================
+processSession(SessionInfo s, bool active, bool sStart, bool sEnd) =>
+    // ---- Session shuru: open price mark, box shuru ----
+    if sStart
+        s.openPrice := open
+        s.hi := high
+        s.lo := low
+        s.startBar := bar_index
+        s.openLine := line.new(bar_index, s.openPrice, bar_index, s.openPrice, color=s.col, width=lw, style=line.style_solid)
+        if showOpenLbl
+            label.new(bar_index, s.openPrice, s.name + " OPEN", style=label.style_label_down, color=color.new(s.col,85), textcolor=s.col, size=lSize)
+        if showBox
+            s.rangeBox := box.new(bar_index, s.hi, bar_index, s.lo, border_color=color.new(s.col,50), bgcolor=color.new(s.col, boxTransp))
+
+    // ---- Session chal rahi hai: range aur lines extend ----
+    else if active
+        s.hi := math.max(s.hi, high)
+        s.lo := math.min(s.lo, low)
+        if not na(s.openLine)
+            line.set_x2(s.openLine, bar_index)
+        if showBox and not na(s.rangeBox)
+            box.set_right(s.rangeBox, bar_index)
+            box.set_top(s.rangeBox, s.hi)
+            box.set_bottom(s.rangeBox, s.lo)
+
+    // ---- Session khatam: close mark + trend line ----
+    if sEnd
+        if showCloseLbl
+            label.new(bar_index, close, s.name + " CLOSE", style=label.style_label_up, color=color.new(s.col,85), textcolor=s.col, size=lSize)
+        s.closeLine := line.new(bar_index, close, bar_index + extendRight, close, color=s.col, width=lw, style=line.style_dashed)
+        if showTrend
+            trendCol = close >= s.openPrice ? color.new(color.green,20) : color.new(color.red,20)
+            s.trendLine := line.new(s.startBar, s.openPrice, bar_index, close, color=trendCol, width=lw+1, style=line.style_solid)
+
+if useAsia
+    processSession(asia, asiaOn, asiaStart, asiaEnd)
+if useLondon
+    processSession(london, lonOn, lonStart, lonEnd)
+if useNY
+    processSession(ny, nyOn, nyStart, nyEnd)
